@@ -5,6 +5,45 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Detector de Emoções</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='estilo.css') }}">
+    <style>
+        /* .marcacao-container {
+            position: relative;
+            display: inline-block;
+        }
+
+
+
+        #marcacoes-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        } */
+
+        .imagem-grande-container {
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .imagem-grande {
+            max-width: 100%;
+            height: auto;
+        }
+
+        #video {
+            max-width: 100%;
+            height: auto;
+            border: 3px solid #333;
+            margin-top: 10px;
+        }
+
+        #video-container {
+            text-align: center;
+            margin-top: 20px;
+        }
+    </style>
 </head>
 <body>
     <div class="container">
@@ -17,18 +56,11 @@
                 <button type="submit">Analisar Imagem</button>
             </form>
             <div id="resultado-imagem"></div>
-            <div class="comparacao-container">
-                <div class="imagem-coluna">
-                    <h3>Imagem Original</h3>
-                    <div class="imagem-wrapper">
-                        <img id="imagem-original" class="imagem-comparacao">
-                    </div>
-                </div>
-                <div class="imagem-coluna">
-                    <h3>Imagem Analisada</h3>
-                    <div class="imagem-wrapper">
-                        <img id="imagem-analisada" class="imagem-comparacao">
-                    </div>
+            <div class="imagem-grande-container">
+                <h3>Imagem Analisada</h3>
+                <div class="imagem-wrapper marcacao-container">
+                    <img id="imagem-analisada" class="imagem-grande">
+                    <div id="marcacoes-container"></div>
                 </div>
             </div>
         </div>
@@ -60,18 +92,53 @@
                     body: formData
                 });
 
+                if (!response.ok) {
+                    throw new Error(`Erro na requisição: ${response.status} ${response.statusText}`);
+                }
+
                 const data = await response.json();
 
                 if (data.erro) {
                     resultadoDiv.textContent = `Erro: ${data.erro}`;
                     resultadoDiv.className = 'erro';
                 } else {
-                    resultadoDiv.textContent = `Emoção detectada: ${data.emocao}`;
-                    resultadoDiv.className = 'sucesso';
+                    if (data.emocoes && Array.isArray(data.emocoes)) {
+                        const imagem = document.getElementById('imagem-analisada');
+                        const marcacoesContainer = document.getElementById('marcacoes-container');
+                        imagem.src = `/uploads/${encodeURIComponent(data.imagem_analisada)}?t=${Date.now()}`;
 
-                    // Atualiza as imagens
-                    document.getElementById('imagem-original').src = `/uploads/${encodeURIComponent(data.imagem_original)}?t=${Date.now()}`;
-                    document.getElementById('imagem-analisada').src = `/uploads/${encodeURIComponent(data.imagem_analisada)}?t=${Date.now()}`;
+                        resultadoDiv.textContent = "Emoções detectadas com sucesso.";
+                        resultadoDiv.className = 'sucesso';
+
+                        // Limpa marcações anteriores
+                        marcacoesContainer.innerHTML = "";
+
+                        imagem.onload = function () {
+                            const larguraReal = imagem.naturalWidth;
+                            const alturaReal = imagem.naturalHeight;
+                            const larguraVisivel = imagem.clientWidth;
+                            const alturaVisivel = imagem.clientHeight;
+
+                            const escalaX = larguraVisivel / larguraReal;
+                            const escalaY = alturaVisivel / alturaReal;
+
+                            data.emocoes.forEach(item => {
+                                const { x, y, w, h } = item.posicao;
+
+                                const div = document.createElement('div');
+                                div.className = 'marcacao';
+                                div.style.left = `${x * escalaX}px`;
+                                div.style.top = `${y * escalaY}px`;
+                                div.style.width = `${w * escalaX}px`;
+                                div.style.height = `${h * escalaY}px`;
+
+                                marcacoesContainer.appendChild(div);
+                            });
+                        };
+                    } else {
+                        resultadoDiv.textContent = "Nenhuma emoção detectada.";
+                        resultadoDiv.className = 'erro';
+                    }
                 }
             } catch (error) {
                 resultadoDiv.textContent = `Erro: ${error.message}`;
@@ -123,10 +190,16 @@
                         intervaloEmocao = setInterval(async () => {
                             try {
                                 const response = await fetch('/obter_emocao');
+
+                                if (!response.ok) {
+                                    throw new Error(`Erro na requisição: ${response.status} ${response.statusText}`);
+                                }
+
                                 const data = await response.json();
                                 emocaoDiv.textContent = `Emoção: ${data.emocao}`;
                             } catch (error) {
                                 console.error("Erro ao obter emoção:", error);
+                                emocaoDiv.textContent = "Erro ao obter emoção.";
                             }
                         }, 1000);
                     }
