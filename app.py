@@ -5,6 +5,7 @@ import cv2
 from werkzeug.utils import secure_filename
 import time
 from threading import Thread, Lock
+import numpy as np
 
 app = Flask(__name__)
 
@@ -19,7 +20,6 @@ emocao_atual = "Nenhuma emoção detectada"
 camera_ativa = False
 camera_thread = None
 captura = None
-
 
 class Camera:
     def __init__(self):
@@ -39,11 +39,79 @@ class Camera:
         if self.captura.isOpened():
             self.captura.release()
 
-
 @app.route('/')
 def pagina_inicial():
     return render_template('index.html')
 
+def analisar_emocao_rosto(rosto, x, y, w, h, resultados, marcacoes, index, lock):
+    try:
+        print(f"[Thread {index}] Analisando rosto na posição ({x}, {y}, {w}, {h})")
+        resultado = DeepFace.analyze(rosto, actions=['emotion'], enforce_detection=False)
+
+        if isinstance(resultado, list) and len(resultado) > 0 and 'dominant_emotion' in resultado[0]:
+            emocao = resultado[0]['dominant_emotion']
+        else:
+            emocao = "Desconhecida"
+    except Exception as e:
+        print(f"[Thread {index}] Erro ao analisar emoção: {e}")
+        emocao = "Erro"
+
+    with lock:
+        resultados.append({
+            'posicao': {'x': int(x), 'y': int(y), 'w': int(w), 'h': int(h)},
+            'emocao': emocao
+        })
+        marcacoes.append({
+            'x': int(x),
+            'y': int(y),
+            'w': int(w),
+            'h': int(h),
+            'emocao': emocao
+        })
+
+def detectar_rostos_e_emocoes(img):
+    resultados = []
+    marcacoes = []
+    threads = []
+    lock = Lock()
+
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    img_cinza = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    img_cinza = cv2.equalizeHist(img_cinza)
+
+    rostos = face_cascade.detectMultiScale(
+        img_cinza,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(30, 30)
+    )
+
+    print(f"[INFO] {len(rostos)} rosto(s) detectado(s)")
+
+    #Processo de criação das threads;
+    for i, (x, y, w, h) in enumerate(rostos):
+        rosto = img[y:y + h, x:x + w]
+        t = Thread(target=analisar_emocao_rosto, args=(rosto, x, y, w, h, resultados, marcacoes, i, lock))
+        t.start()
+        threads.append(t)
+
+    #Aguarda a conclusão de todas as threads para dar continuidade
+    for t in threads:
+        t.join()
+
+    for m in marcacoes:
+        x, y, w, h = m['x'], m['y'], m['w'], m['h']
+        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.putText(img, m['emocao'], (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+
+    # 🔁 Conversão para JSON
+    for r in resultados:
+        r['posicao'] = {k: int(v) for k, v in r['posicao'].items()}
+    for m in marcacoes:
+        for k in ['x', 'y', 'w', 'h']:
+            m[k] = int(m[k])
+
+    return resultados, img, marcacoes
 
 @app.route('/detectar_imagem', methods=['POST'])
 def detectar_imagem():
@@ -55,7 +123,6 @@ def detectar_imagem():
         return jsonify({'erro': 'Nome de arquivo vazio'}), 400
 
     try:
-        # Gera nome seguro para o arquivo
         nome_arquivo = secure_filename(arquivo.filename)
         if not nome_arquivo:
             nome_arquivo = f"imagem_{int(time.time())}.jpg"
@@ -66,65 +133,77 @@ def detectar_imagem():
 
         # Salva a imagem original
         arquivo.save(caminho_original)
+        print(f"[INFO] Imagem salva: {caminho_original}")
 
-        # Processamento da imagem
+        # Lê imagem com OpenCV
         img = cv2.imread(caminho_original)
+        print(f"[INFO] Tipo da imagem carregada: {type(img)}")
         if img is None:
+            print("[ERRO] cv2.imread retornou None.")
             return jsonify({'erro': 'Não foi possível ler a imagem'}), 400
 
-        # Análise de emoção
-        resultado = DeepFace.analyze(img_path=img, actions=['emotion'], enforce_detection=False)
-        emocao = resultado[0]['dominant_emotion']
+        # Detectar rostos e emoções com threads
+        resultados, img_analisada, marcacoes = detectar_rostos_e_emocoes(img)
+        print(f"[INFO] Emoções detectadas: {resultados}")
 
-        # Cria versão analisada
-        img_analisada = img.copy()
-        cv2.putText(img_analisada, f"Emoção: {emocao}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-        # Salva imagem analisada
+        # Salva imagem com marcações
         nome_analisada = f"analisada_{nome_base}"
         caminho_analisada = os.path.join(PASTA_UPLOAD, nome_analisada)
         cv2.imwrite(caminho_analisada, img_analisada)
+        print(f"[INFO] Imagem analisada salva: {caminho_analisada}")
 
         return jsonify({
-            'status': 'sucesso',
-            'emocao': emocao,
-            'imagem_original': nome_base,
-            'imagem_analisada': nome_analisada
-        })
+            'imagem_analisada': nome_analisada,
+            'emocoes': resultados
+        }), 200
 
     except Exception as e:
-        return jsonify({'erro': str(e)}), 500
-
+        print(f"[ERRO] Exceção ao processar imagem: {str(e)}")
+        return jsonify({'erro': f'Ocorreu um erro interno: {str(e)}'}), 500
 
 @app.route('/uploads/<nome_arquivo>')
 def servir_imagem(nome_arquivo):
-    return send_from_directory(PASTA_UPLOAD, nome_arquivo)
-
+    try:
+        return send_from_directory(PASTA_UPLOAD, nome_arquivo)
+    except Exception as e:
+        return jsonify({'erro': f'Ocorreu um erro ao servir a imagem: {str(e)}'}), 500
 
 def obter_frame():
     global frame_atual, lock
     with lock:
         if frame_atual is None:
             return None
-        _, buffer = cv2.imencode('.jpg', frame_atual)
+        ret, buffer = cv2.imencode('.jpg', frame_atual)
+        if not ret:
+            raise RuntimeError("Erro ao codificar o frame em JPEG")
         return buffer.tobytes()
 
-
 def gerar_frames():
+    global camera_ativa
     while camera_ativa:
-        frame = obter_frame()
-        if frame is not None:
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        time.sleep(0.033)  # ~30 FPS
-
+        try:
+            frame = obter_frame()
+            if frame is not None:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            else:
+                # Aguarda para evitar loop excessivo
+                time.sleep(0.033)
+        except Exception as e:
+            print(f"[ERRO] ao gerar frames: {e}")
+            break
 
 @app.route('/video_feed')
 def video_feed():
-    return Response(gerar_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-
+    global camera_ativa
+    if not camera_ativa:
+        return jsonify({'erro': 'A câmera não está ativa'}), 400
+    try:
+        return Response(gerar_frames(),
+                        mimetype='multipart/x-mixed-replace; boundary=frame')
+    except Exception as e:
+        print(f"[ERRO] no feed de vídeo: {e}")
+        return jsonify({'erro': f'Ocorreu um erro no feed de vídeo: {str(e)}'}), 500
 
 @app.route('/iniciar_camera', methods=['POST'])
 def iniciar_camera():
@@ -134,7 +213,6 @@ def iniciar_camera():
         return jsonify({'status': 'já ativa'})
 
     try:
-        # Libera a câmera se já estiver em uso
         if captura is not None:
             captura.release()
 
@@ -143,8 +221,7 @@ def iniciar_camera():
         camera_thread.start()
         return jsonify({'status': 'camera iniciada'})
     except Exception as e:
-        return jsonify({'erro': str(e)}), 500
-
+        return jsonify({'erro': f'Ocorreu um erro: {str(e)}'}), 500
 
 @app.route('/parar_camera', methods=['POST'])
 def parar_camera():
@@ -153,57 +230,86 @@ def parar_camera():
     if not camera_ativa:
         return jsonify({'status': 'já parada'})
 
-    camera_ativa = False
-    if camera_thread is not None:
-        camera_thread.join()
-    if captura is not None:
-        captura.release()
-        captura = None
-    return jsonify({'status': 'camera parada'})
-
+    try:
+        camera_ativa = False
+        if camera_thread is not None:
+            camera_thread.join()
+        if captura is not None:
+            captura.release()
+            captura = None
+        return jsonify({'status': 'camera parada'})
+    except Exception as e:
+        return jsonify({'erro': f'Ocorreu um erro: {str(e)}'}), 500
 
 @app.route('/obter_emocao', methods=['GET'])
 def obter_emocao():
     global emocao_atual
     return jsonify({'emocao': emocao_atual})
 
-
 def iniciar_deteccao_camera():
     global frame_atual, emocao_atual, camera_ativa, lock, captura
 
     try:
         camera = Camera()
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
         while camera_ativa:
             frame = camera.obter_frame()
-
             if frame is None:
                 continue
 
             try:
-                # Redimensiona para melhor performance
-                frame_pequeno = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+                frame_red = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+                img_cinza = cv2.cvtColor(frame_red, cv2.COLOR_BGR2GRAY)
+                img_cinza = cv2.equalizeHist(img_cinza)
 
-                # Análise de emoção
-                resultado = DeepFace.analyze(frame_pequeno, actions=['emotion'], enforce_detection=False)
-                emocao = resultado[0]['dominant_emotion']
-                emocao_atual = emocao
+                rostos = face_cascade.detectMultiScale(
+                    img_cinza,
+                    scaleFactor=1.1,
+                    minNeighbors=5,
+                    minSize=(30, 30)
+                )
 
-                # Desenha resultados no frame
-                cv2.putText(frame, f"Emoção: {emocao}", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                threads = []
+                resultados = []
+                lock_resultados = Lock()
+
+                for i, (x, y, w, h) in enumerate(rostos):
+                    rosto = frame_red[y:y + h, x:x + w]
+                    t = Thread(target=analisar_emocao_rosto,
+                            args=(rosto, x, y, w, h, resultados, [], i, lock_resultados))
+                    t.start()
+                    threads.append(t)
+
+                for t in threads:
+                    t.join()
+
+                if resultados:
+                    emocao_atual = resultados[0]['emocao']
+                else:
+                    emocao_atual = "Nenhuma emoção detectada"
+
+                for res in resultados:
+                    pos = res['posicao']
+                    x, y, w, h = pos['x'], pos['y'], pos['w'], pos['h']
+                    emocao = res['emocao']
+                    cv2.rectangle(frame_red, (x, y), (x + w, y + h), (0, 255, 0), 2) 
+                    cv2.putText(frame_red, emocao, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+                frame_result = cv2.resize(frame_red, (frame.shape[1], frame.shape[0]))
+
             except Exception as e:
+                print(f"[ERRO] Análise na câmera: {e}")
+                frame_result = frame
                 emocao_atual = "Analisando..."
 
-            # Atualiza frame global
             with lock:
-                frame_atual = frame
+                frame_atual = frame_result
 
         camera.liberar()
     except Exception as e:
-        print(f"Erro na thread da câmera: {str(e)}")
+        print(f"[ERRO] na thread da câmera: {str(e)}")
         camera_ativa = False
-
 
 if __name__ == '__main__':
     app.run(debug=True, threaded=True)
