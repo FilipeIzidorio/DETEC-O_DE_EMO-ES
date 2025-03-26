@@ -88,21 +88,21 @@ def detectar_rostos_e_emocoes(img):
 
     print(f"[INFO] {len(rostos)} rosto(s) detectado(s)")
 
+    #Processo de criação das threads;
     for i, (x, y, w, h) in enumerate(rostos):
         rosto = img[y:y + h, x:x + w]
         t = Thread(target=analisar_emocao_rosto, args=(rosto, x, y, w, h, resultados, marcacoes, i, lock))
         t.start()
         threads.append(t)
 
+    #Aguarda a conclusão de todas as threads para dar continuidade
     for t in threads:
         t.join()
 
     for m in marcacoes:
         x, y, w, h = m['x'], m['y'], m['w'], m['h']
-        # Alterar a cor do retângulo (BGR: azul, verde, vermelho)
-        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)  # Verde
-        # Alterar a cor do texto (BGR: azul, verde, vermelho)
-        cv2.putText(img, m['emocao'], (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)  # Vermelho
+        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.putText(img, m['emocao'], (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
 
     # 🔁 Conversão para JSON
     for r in resultados:
@@ -123,7 +123,6 @@ def detectar_imagem():
         return jsonify({'erro': 'Nome de arquivo vazio'}), 400
 
     try:
-        # Gera nome seguro
         nome_arquivo = secure_filename(arquivo.filename)
         if not nome_arquivo:
             nome_arquivo = f"imagem_{int(time.time())}.jpg"
@@ -167,7 +166,6 @@ def servir_imagem(nome_arquivo):
     try:
         return send_from_directory(PASTA_UPLOAD, nome_arquivo)
     except Exception as e:
-        # Retornar erro como JSON válido
         return jsonify({'erro': f'Ocorreu um erro ao servir a imagem: {str(e)}'}), 500
 
 def obter_frame():
@@ -175,24 +173,36 @@ def obter_frame():
     with lock:
         if frame_atual is None:
             return None
-        _, buffer = cv2.imencode('.jpg', frame_atual)
+        ret, buffer = cv2.imencode('.jpg', frame_atual)
+        if not ret:
+            raise RuntimeError("Erro ao codificar o frame em JPEG")
         return buffer.tobytes()
 
 def gerar_frames():
+    global camera_ativa
     while camera_ativa:
-        frame = obter_frame()
-        if frame is not None:
-            yield (b'--frame\r\n'
-                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        time.sleep(0.033)  # ~30 FPS
+        try:
+            frame = obter_frame()
+            if frame is not None:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            else:
+                # Aguarda para evitar loop excessivo
+                time.sleep(0.033)
+        except Exception as e:
+            print(f"[ERRO] ao gerar frames: {e}")
+            break
 
 @app.route('/video_feed')
 def video_feed():
+    global camera_ativa
+    if not camera_ativa:
+        return jsonify({'erro': 'A câmera não está ativa'}), 400
     try:
         return Response(gerar_frames(),
                         mimetype='multipart/x-mixed-replace; boundary=frame')
     except Exception as e:
-        # Retornar erro como JSON válido
+        print(f"[ERRO] no feed de vídeo: {e}")
         return jsonify({'erro': f'Ocorreu um erro no feed de vídeo: {str(e)}'}), 500
 
 @app.route('/iniciar_camera', methods=['POST'])
@@ -203,7 +213,6 @@ def iniciar_camera():
         return jsonify({'status': 'já ativa'})
 
     try:
-        # Libera a câmera se já estiver em uso
         if captura is not None:
             captura.release()
 
@@ -212,7 +221,6 @@ def iniciar_camera():
         camera_thread.start()
         return jsonify({'status': 'camera iniciada'})
     except Exception as e:
-        # Retornar erro como JSON válido
         return jsonify({'erro': f'Ocorreu um erro: {str(e)}'}), 500
 
 @app.route('/parar_camera', methods=['POST'])
@@ -231,7 +239,6 @@ def parar_camera():
             captura = None
         return jsonify({'status': 'camera parada'})
     except Exception as e:
-        # Retornar erro como JSON válido
         return jsonify({'erro': f'Ocorreu um erro: {str(e)}'}), 500
 
 @app.route('/obter_emocao', methods=['GET'])
@@ -252,7 +259,6 @@ def iniciar_deteccao_camera():
                 continue
 
             try:
-                # Redimensiona para melhorar desempenho
                 frame_red = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
                 img_cinza = cv2.cvtColor(frame_red, cv2.COLOR_BGR2GRAY)
                 img_cinza = cv2.equalizeHist(img_cinza)
@@ -278,23 +284,18 @@ def iniciar_deteccao_camera():
                 for t in threads:
                     t.join()
 
-                # Atualizar a emoção dominante (primeiro rosto, se houver)
                 if resultados:
                     emocao_atual = resultados[0]['emocao']
                 else:
                     emocao_atual = "Nenhuma emoção detectada"
 
-                # Desenhar marcações no frame_red
                 for res in resultados:
                     pos = res['posicao']
                     x, y, w, h = pos['x'], pos['y'], pos['w'], pos['h']
                     emocao = res['emocao']
-                    # Alterar a cor do retângulo (BGR: azul, verde, vermelho)
-                    cv2.rectangle(frame_red, (x, y), (x + w, y + h), (0, 255, 0), 2)  # Verde
-                    # Alterar a cor do texto (BGR: azul, verde, vermelho)
-                    cv2.putText(frame_red, emocao, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)  # Vermelho
+                    cv2.rectangle(frame_red, (x, y), (x + w, y + h), (0, 255, 0), 2) 
+                    cv2.putText(frame_red, emocao, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-                # Redimensionar de volta ao original
                 frame_result = cv2.resize(frame_red, (frame.shape[1], frame.shape[0]))
 
             except Exception as e:
